@@ -1,13 +1,8 @@
 import { randomUUID } from "node:crypto"
-import { Context, Plugin, PublicAPI, Query, QueryResponse, Result } from "@wox-launcher/wox-plugin"
-import type { CreateWindowOption, CreateWindowResult, PluginWindow } from "./window"
+import { Context, Plugin, PluginWindow, PublicAPI, Query, QueryResponse, Result } from "@wox-launcher/wox-plugin"
 
-type WindowAPI = PublicAPI & {
-  CreateWindow(ctx: Context, option: CreateWindowOption): Promise<CreateWindowResult>
-  ShowToastMsg(ctx: Context, option: { Message: string }): Promise<{ Success: boolean; ErrMsg?: string }>
-}
 type Timer = { id: string; durationLabel: string; note: string; durationMs: number; deadlineUnixMs: number; remainingMs: number; paused: boolean }
-let api: WindowAPI
+let api: PublicAPI
 let timers = new Map<string, Timer>()
 let windows = new Map<string, PluginWindow>()
 let tracked = new Set<string>()
@@ -249,7 +244,7 @@ async function tick(ctx: Context): Promise<void> {
 }
 export const plugin: Plugin = {
   init: async (ctx, params) => {
-    api = params.API as WindowAPI
+    api = params.API
     timers = new Map()
     windows = new Map()
     tracked = new Set()

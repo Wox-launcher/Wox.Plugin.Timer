@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { Context, PublicAPI, Query } from "@wox-launcher/wox-plugin"
+import { Context, PublicAPI, Query, WindowEvent } from "@wox-launcher/wox-plugin"
 import { formatRemaining, parseDuration, plugin } from "../index"
 
 const ctx = {} as Context
@@ -16,7 +16,7 @@ test("parses durations and notes", () => {
 test("starts, pauses, resumes and closes a pinned timer", async () => {
   jest.useFakeTimers().setSystemTime(1700000000000)
   let unload: (c: Context) => Promise<void> = async () => {}
-  let onEvent: (c: Context, e: { Type: string; WindowID: string; Data?: unknown }) => Promise<void> = async () => {}
+  let onEvent: (c: Context, e: WindowEvent) => Promise<void> = async () => {}
   const window = {
     ID: "window",
     Show: jest.fn().mockResolvedValue({ Success: true }),
