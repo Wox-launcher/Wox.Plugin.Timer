@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto"
-import { Context, CreateWindowOption, Plugin, PluginWindow, PublicAPI, Query, QueryResponse, Result } from "@wox-launcher/wox-plugin"
+import { Context, Plugin, PluginWindow, PublicAPI, Query, QueryResponse, Result, WoxViewNode, WoxViewTree } from "@wox-launcher/wox-plugin"
 
 type Timer = { id: string; durationLabel: string; note: string; durationMs: number; deadlineUnixMs: number; remainingMs: number; paused: boolean }
 let api: PublicAPI
 let timers = new Map<string, Timer>()
-// The published SDK still describes the unpublished HTML window API.
-type WoxViewWindow = Omit<PluginWindow, "Content"> & { Content: { Update(ctx: Context, option: { Data: string; Sequence: number }): Promise<{ Success: boolean; ErrMsg?: string }> } }
-let windows = new Map<string, { window: WoxViewWindow; sequence: number; hovered: boolean }>()
+let windows = new Map<string, { window: PluginWindow; sequence: number; hovered: boolean }>()
 let tracked = new Set<string>()
 let interval: ReturnType<typeof setInterval>
 let ticking = false
@@ -60,24 +58,25 @@ async function closeWindow(ctx: Context, id: string): Promise<void> {
 async function windowContent(ctx: Context, t: Timer, hovered = false): Promise<string> {
   const paused = t.paused ? await translation(ctx, "status_paused") : ""
   const note = [t.note, t.paused ? paused : ""].filter(Boolean).join(" · ")
-  return JSON.stringify({
+  const tree: WoxViewTree = {
     version: 1,
     root: {
       type: "stack",
-      props: { onHoverChange: { $handler: "hover" }, style: { height: 76 } },
+      props: { onHoverChange: { $handler: "hover" }, style: { height: 76, backgroundColor: "$background" } },
       children: [
         {
           type: "column",
           props: { style: { left: 0, right: 0, top: 0, bottom: 0, padding: 8, gap: 5, alignItems: "center", justifyContent: "center" } },
           children: [
             { type: "text", key: "time", props: { text: formatRemaining(remaining(t)), style: { fontSize: 22, fontWeight: "semibold", color: "$text", maxLines: 1, textAlign: "center" } } },
-            ...(note ? [{ type: "text", key: "note", props: { text: note, style: { fontSize: 11, color: "$textSecondary", maxLines: 1, textAlign: "center" } } }] : [])
+            ...(note ? [{ type: "text", key: "note", props: { text: note, style: { fontSize: 11, color: "$textSecondary", maxLines: 1, textAlign: "center" } } } satisfies WoxViewNode] : [])
           ]
         },
-        ...(hovered ? [{ type: "icon-button", key: "close", props: { icon: "control.close", iconColorMode: "tint", label: key("action_unpin_from_desktop"), onPress: { $handler: "close" }, style: { right: 4, top: 4, width: 24, height: 24 } } }] : [])
+        ...(hovered ? [{ type: "icon-button", key: "close", props: { icon: "control.close", iconColorMode: "tint", label: key("action_unpin_from_desktop"), onPress: { $handler: "close" }, style: { right: 4, top: 4, width: 24, height: 24 } } } satisfies WoxViewNode] : [])
       ]
     }
-  })
+  }
+  return JSON.stringify(tree)
 }
 async function updateWindow(ctx: Context, t: Timer): Promise<void> {
   const entry = windows.get(t.id)
@@ -93,8 +92,7 @@ async function pin(ctx: Context, t: Timer): Promise<void> {
     await closeWindow(ctx, t.id)
     return
   }
-  const windowAPI = api as unknown as { CreateWindow(ctx: Context, option: Omit<CreateWindowOption, "Content"> & { Content: { Type: "woxview"; Data: string } }): Promise<{ Success: boolean; ErrMsg?: string; Window?: WoxViewWindow }> }
-  const created = await windowAPI.CreateWindow(ctx, {
+  const created = await api.CreateWindow(ctx, {
     Window: {
       Width: Math.min(220, Math.max(128, formatRemaining(remaining(t)).length * 13 + 32, Array.from(t.note).length * 11 + 24)),
       Height: 76,
@@ -110,11 +108,11 @@ async function pin(ctx: Context, t: Timer): Promise<void> {
         windows.delete(t.id)
         await updateRow(eventCtx, t.id)
       }
-      if ((event.Type as string) === "woxview_event" && typeof event.Data === "object" && event.Data !== null && "Handler" in event.Data && event.Data.Handler === "close" && windows.get(t.id)?.window.ID === event.WindowID) {
+      if (event.Type === "woxview_event" && typeof event.Data === "object" && event.Data !== null && "Handler" in event.Data && event.Data.Handler === "close" && windows.get(t.id)?.window.ID === event.WindowID) {
         await closeWindow(eventCtx, t.id)
         await updateRow(eventCtx, t.id)
       }
-      if ((event.Type as string) === "woxview_event" && typeof event.Data === "object" && event.Data !== null && "Handler" in event.Data && event.Data.Handler === "hover" && "Args" in event.Data && Array.isArray(event.Data.Args) && typeof event.Data.Args[0] === "boolean") {
+      if (event.Type === "woxview_event" && typeof event.Data === "object" && event.Data !== null && "Handler" in event.Data && event.Data.Handler === "hover" && "Args" in event.Data && Array.isArray(event.Data.Args) && typeof event.Data.Args[0] === "boolean") {
         const entry = windows.get(t.id)
         if (entry && entry.window.ID === event.WindowID && entry.hovered !== event.Data.Args[0]) {
           entry.hovered = event.Data.Args[0]
