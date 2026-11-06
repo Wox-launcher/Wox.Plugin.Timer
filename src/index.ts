@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto"
-import { Context, Plugin, PluginWindow, PublicAPI, Query, QueryResponse, Result } from "@wox-launcher/wox-plugin"
+import { Context, CreateWindowOption, Plugin, PluginWindow, PublicAPI, Query, QueryResponse, Result } from "@wox-launcher/wox-plugin"
 
 type Timer = { id: string; durationLabel: string; note: string; durationMs: number; deadlineUnixMs: number; remainingMs: number; paused: boolean }
 let api: PublicAPI
 let timers = new Map<string, Timer>()
-let windows = new Map<string, PluginWindow>()
+// The published SDK still describes the unpublished HTML window API.
+type WoxViewWindow = Omit<PluginWindow, "Content"> & { Content: { Update(ctx: Context, option: { Data: string; Sequence: number }): Promise<{ Success: boolean; ErrMsg?: string }> } }
+let windows = new Map<string, { window: WoxViewWindow; sequence: number; hovered: boolean }>()
 let tracked = new Set<string>()
 let interval: ReturnType<typeof setInterval>
 let ticking = false
@@ -12,14 +14,6 @@ let saveQueue = Promise.resolve()
 const icon = { ImageType: "relative" as const, ImageData: "images/app.svg" }
 const key = (s: string) => `i18n:plugin_timer_${s}`
 const hotkey = process.platform === "darwin" ? "cmd+enter" : "ctrl+enter"
-const html = `<!doctype html><html><meta charset="utf-8"><style>
-html,body{background:transparent} body{margin:0;color:var(--text);font-family:system-ui;display:grid;place-items:center;height:100vh;text-align:center;user-select:none;-webkit-user-select:none}
-#time{font-size:22px;font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap} #note{font-size:11px;color:var(--secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:calc(100vw - 24px);margin-top:5px} #note:empty{display:none}
-button{position:absolute;top:6px;right:6px;width:24px;height:24px;padding:5px;border:0;border-radius:6px;background:transparent;color:var(--text);opacity:0;pointer-events:none;cursor:pointer} body:hover button,button:focus-visible{opacity:1;pointer-events:auto} button:hover{background:color-mix(in srgb,var(--text) 12%,transparent)} button svg{width:100%;height:100%;display:block}
-</style><div><div id="time"></div><div id="note"></div></div><button id="close" type="button" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 5l14 14M19 5L5 19"/></svg></button><script>
-woxWindow.onMessage(s=>{document.getElementById('time').textContent=s.time;document.getElementById('note').textContent=s.note;if(s.closeLabel)document.getElementById('close').setAttribute('aria-label',s.closeLabel)})
-document.getElementById('close').addEventListener('click',()=>woxWindow.postMessage({action:'close'}))
-</script></html>`
 
 export function parseDuration(input: string): { durationMs: number; label: string; note: string } | null {
   let rest = input.trim(),
@@ -59,26 +53,48 @@ function save(ctx: Context): Promise<void> {
   return saveQueue
 }
 async function closeWindow(ctx: Context, id: string): Promise<void> {
-  const window = windows.get(id)
+  const entry = windows.get(id)
   windows.delete(id)
-  if (window) await window.Close(ctx, {})
+  if (entry) await entry.window.Close(ctx, {})
+}
+async function windowContent(ctx: Context, t: Timer, hovered = false): Promise<string> {
+  const paused = t.paused ? await translation(ctx, "status_paused") : ""
+  const note = [t.note, t.paused ? paused : ""].filter(Boolean).join(" · ")
+  return JSON.stringify({
+    version: 1,
+    root: {
+      type: "stack",
+      props: { onHoverChange: { $handler: "hover" }, style: { height: 76 } },
+      children: [
+        {
+          type: "column",
+          props: { style: { left: 0, right: 0, top: 0, bottom: 0, padding: 8, gap: 5, alignItems: "center", justifyContent: "center" } },
+          children: [
+            { type: "text", key: "time", props: { text: formatRemaining(remaining(t)), style: { fontSize: 22, fontWeight: "semibold", color: "$text", maxLines: 1, textAlign: "center" } } },
+            ...(note ? [{ type: "text", key: "note", props: { text: note, style: { fontSize: 11, color: "$textSecondary", maxLines: 1, textAlign: "center" } } }] : [])
+          ]
+        },
+        ...(hovered ? [{ type: "icon-button", key: "close", props: { icon: "control.close", iconColorMode: "tint", label: key("action_unpin_from_desktop"), onPress: { $handler: "close" }, style: { right: 4, top: 4, width: 24, height: 24 } } }] : [])
+      ]
+    }
+  })
 }
 async function updateWindow(ctx: Context, t: Timer): Promise<void> {
-  const window = windows.get(t.id)
-  if (!window) return
-  const paused = t.paused ? await translation(ctx, "status_paused") : ""
-  await window.Content.PostMessage(ctx, { Data: { time: formatRemaining(remaining(t)), note: [t.note, paused].filter(Boolean).join(" · ") } })
+  const entry = windows.get(t.id)
+  if (!entry) return
+  const sequence = ++entry.sequence
+  const data = await windowContent(ctx, t, entry.hovered)
+  if (windows.get(t.id) !== entry || sequence !== entry.sequence) return
+  const result = await entry.window.Content.Update(ctx, { Data: data, Sequence: sequence })
+  if (!result.Success && windows.get(t.id) === entry && sequence === entry.sequence) throw new Error(result.ErrMsg || "Could not update timer window")
 }
 async function pin(ctx: Context, t: Timer): Promise<void> {
   if (windows.has(t.id)) {
     await closeWindow(ctx, t.id)
     return
   }
-  const colors = await api.GetThemeColors(ctx, {})
-  // Only insert validated CSS colors into plugin-authored HTML.
-  const cssColor = (value: string, fallback: string) => (/^#[0-9a-f]{6}$/i.test(value) ? value : fallback)
-  const themedHTML = html.replace("<style>", `<style>:root{--text:${cssColor(colors.Text, "#ffffff")};--secondary:${cssColor(colors.SecondaryText, "#cbd1df")}}`)
-  const created = await api.CreateWindow(ctx, {
+  const windowAPI = api as unknown as { CreateWindow(ctx: Context, option: Omit<CreateWindowOption, "Content"> & { Content: { Type: "woxview"; Data: string } }): Promise<{ Success: boolean; ErrMsg?: string; Window?: WoxViewWindow }> }
+  const created = await windowAPI.CreateWindow(ctx, {
     Window: {
       Width: Math.min(220, Math.max(128, formatRemaining(remaining(t)).length * 13 + 32, Array.from(t.note).length * 11 + 24)),
       Height: 76,
@@ -88,15 +104,22 @@ async function pin(ctx: Context, t: Timer): Promise<void> {
       DragContent: true,
       Topmost: true
     },
-    Content: { Type: "html", Data: themedHTML },
+    Content: { Type: "woxview", Data: await windowContent(ctx, t) },
     OnEvent: async (eventCtx, event) => {
-      if (event.Type === "closed" && windows.get(t.id)?.ID === event.WindowID) {
+      if (event.Type === "closed" && windows.get(t.id)?.window.ID === event.WindowID) {
         windows.delete(t.id)
         await updateRow(eventCtx, t.id)
       }
-      if (event.Type === "message" && typeof event.Data === "object" && event.Data !== null && "action" in event.Data && event.Data.action === "close" && windows.get(t.id)?.ID === event.WindowID) {
+      if ((event.Type as string) === "woxview_event" && typeof event.Data === "object" && event.Data !== null && "Handler" in event.Data && event.Data.Handler === "close" && windows.get(t.id)?.window.ID === event.WindowID) {
         await closeWindow(eventCtx, t.id)
         await updateRow(eventCtx, t.id)
+      }
+      if ((event.Type as string) === "woxview_event" && typeof event.Data === "object" && event.Data !== null && "Handler" in event.Data && event.Data.Handler === "hover" && "Args" in event.Data && Array.isArray(event.Data.Args) && typeof event.Data.Args[0] === "boolean") {
+        const entry = windows.get(t.id)
+        if (entry && entry.window.ID === event.WindowID && entry.hovered !== event.Data.Args[0]) {
+          entry.hovered = event.Data.Args[0]
+          await updateWindow(eventCtx, t)
+        }
       }
       if (event.Type === "error") await api.Log(eventCtx, "Error", `Timer window: ${event.ErrMsg}`)
     }
@@ -106,13 +129,14 @@ async function pin(ctx: Context, t: Timer): Promise<void> {
     await created.Window.Close(ctx, {})
     return
   }
-  windows.set(t.id, created.Window)
-  await created.Window.Content.PostMessage(ctx, { Data: { closeLabel: await translation(ctx, "action_unpin_from_desktop"), time: formatRemaining(remaining(t)), note: t.note } })
-  await updateWindow(ctx, t)
-  const shown = await created.Window.Show(ctx, {})
-  if (!shown.Success) {
+  windows.set(t.id, { window: created.Window, sequence: 0, hovered: false })
+  try {
+    await updateWindow(ctx, t)
+    const shown = await created.Window.Show(ctx, {})
+    if (!shown.Success) throw new Error(shown.ErrMsg)
+  } catch (error) {
     await closeWindow(ctx, t.id)
-    throw new Error(shown.ErrMsg)
+    throw error
   }
 }
 async function start(ctx: Context, durationMs: number, label: string, note: string, pinned: boolean): Promise<Timer> {

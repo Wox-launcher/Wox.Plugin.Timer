@@ -22,13 +22,12 @@ test("starts, pauses, resumes and closes a pinned timer", async () => {
     Show: jest.fn().mockResolvedValue({ Success: true }),
     Close: jest.fn().mockResolvedValue({ Success: true }),
     SetOptions: jest.fn().mockResolvedValue({ Success: true }),
-    Content: { PostMessage: jest.fn().mockResolvedValue({ Success: true }) }
+    Content: { Update: jest.fn().mockResolvedValue({ Success: true }) }
   }
   const api = {
     GetSetting: jest.fn().mockResolvedValue(""),
     SetSetting: jest.fn().mockResolvedValue({ Success: true }),
     GetTranslation: jest.fn(async (_c, k) => k),
-    GetThemeColors: jest.fn().mockResolvedValue({ Text: "#111111", SecondaryText: "#555555" }),
     ShowToastMsg: jest.fn().mockResolvedValue({ Success: true }),
     CreateWindow: jest.fn(async (_c, o) => {
       onEvent = o.OnEvent
@@ -47,19 +46,38 @@ test("starts, pauses, resumes and closes a pinned timer", async () => {
   const start = ((await plugin.query(ctx, query("5m tea"))) as { Results: any[] }).Results[0].Actions[0]
   await start.Action(ctx, {})
   expect(window.Show).toHaveBeenCalled()
-  expect(api.CreateWindow.mock.calls[0][1].Window).toMatchObject({ Width: 128, Height: 76, HideChrome: true, DragContent: true, Movable: true })
-  expect(api.CreateWindow.mock.calls[0][1].Content.Data).toContain("user-select:none")
-  expect(api.CreateWindow.mock.calls[0][1].Content.Data).toContain("html,body{background:transparent}")
-  expect(api.CreateWindow.mock.calls[0][1].Content.Data).toContain("--text:#111111;--secondary:#555555")
-  expect(api.CreateWindow.mock.calls[0][1].Content.Data).toContain("body:hover button")
+  const options = api.CreateWindow.mock.calls[0][1]
+  expect(options.Window).toMatchObject({ Width: 128, Height: 76, Movable: true, Closable: true, HideChrome: true, DragContent: true })
+  expect(options.Content.Type).toBe("woxview")
+  const tree = JSON.parse(options.Content.Data)
+  expect(tree.version).toBe(1)
+  expect(tree.root.children[0].children.map((node: any) => node.props.text)).toEqual(["05:00", "tea"])
+  expect(tree.root.props.onHoverChange).toEqual({ $handler: "hover" })
+  expect(tree.root.children).toHaveLength(1)
+  const hover = async (inside: boolean) => onEvent(ctx, { Type: "woxview_event", WindowID: "window", Data: { Handler: "hover", Args: [inside] } } as unknown as WindowEvent)
+  await hover(true)
+  let latestTree = JSON.parse(window.Content.Update.mock.calls[window.Content.Update.mock.calls.length - 1][1].Data)
+  expect(latestTree.root.children[1].props.onPress).toEqual({ $handler: "close" })
+  await hover(false)
+  latestTree = JSON.parse(window.Content.Update.mock.calls[window.Content.Update.mock.calls.length - 1][1].Data)
+  expect(latestTree.root.children).toHaveLength(1)
   expect(window.SetOptions).not.toHaveBeenCalled()
+  await jest.advanceTimersByTimeAsync(1000)
+  expect(JSON.parse(window.Content.Update.mock.calls[window.Content.Update.mock.calls.length - 1][1].Data).root.children[0].children[0].props.text).toBe("04:59")
   let row = ((await plugin.query(ctx, query(""))) as { Results: any[] }).Results[0]
   await row.Actions[0].Action(ctx, {})
+  const pausedTree = JSON.parse(window.Content.Update.mock.calls[window.Content.Update.mock.calls.length - 1][1].Data)
+  expect(pausedTree.root.children[0].children[1].props.text).toBe("tea · plugin_timer_status_paused")
   jest.advanceTimersByTime(10000)
   row = ((await plugin.query(ctx, query(""))) as { Results: any[] }).Results[0]
-  expect(row.Title).toBe("05:00")
+  expect(row.Title).toBe("04:59")
   await row.Actions[0].Action(ctx, {})
-  await onEvent(ctx, { Type: "message", WindowID: "window", Data: { action: "close" } })
+  await row.Actions[2].OnSubmit(ctx, { Values: { note: "tea <&>" } })
+  expect(JSON.parse(window.Content.Update.mock.calls[window.Content.Update.mock.calls.length - 1][1].Data).root.children[0].children[1].props.text).toBe("tea <&>")
+  await hover(true)
+  await onEvent(ctx, { Type: "woxview_event", WindowID: "other", Data: { Handler: "close" } } as unknown as WindowEvent)
+  expect(window.Close).not.toHaveBeenCalled()
+  await onEvent(ctx, { Type: "woxview_event", WindowID: "window", Data: { Handler: "close" } } as unknown as WindowEvent)
   expect(window.Close).toHaveBeenCalled()
   row = ((await plugin.query(ctx, query(""))) as { Results: any[] }).Results[0]
   expect(row.Tails).toHaveLength(1)
